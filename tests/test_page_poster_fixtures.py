@@ -65,13 +65,13 @@ def _generate_page_html(scenario: str, page_id: str, page_name: str, has_preexis
     <div role="dialog" id="composer_dialog" aria-label="Tạo bài viết" style="display:none; border:2px solid #000; padding:20px; background:#fff;">
         <h2>Tạo bài viết</h2>
         <div role="textbox" contenteditable="true" aria-label="Tạo bài viết" id="composer_textbox" style="min-height:60px; border:1px solid #aaa; padding:5px;"></div>
-        
+
         <div role="button" id="media_btn" aria-label="Ảnh/video" style="margin-top:10px; cursor:pointer;">Ảnh/video</div>
         <input type="file" id="file_input" style="display:none;" multiple accept="image/*" />
-        
+
         <div id="media_preview" style="margin-top:5px;"></div>
         <div id="upload_error_box" style="display:none; color:red; margin-top:5px;">Không thể tải lên ảnh</div>
-        
+
         <div role="button" id="post_btn" aria-label="Đăng" aria-disabled="true" style="margin-top:15px; padding:10px; background:#1877f2; color:#fff; cursor:pointer;">
             Đăng
         </div>

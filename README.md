@@ -149,4 +149,3 @@ pytest tests/ -v
 Các bộ kiểm thử bao gồm:
 - `tests/test_reliable_runner.py`: Kiểm thử schema, tính nguyên tử, chống ghi đè, và khóa đơn tiến trình.
 - `tests/test_page_poster_fixtures.py`: Kiểm thử tương tác Chromium thực tế trên các kịch bản: hết hạn phiên đăng nhập, checkpoint, danh tính không khớp, thiếu tệp media, lỗi tải lên, bài viết cũ trên dòng thời gian, và xử lý timeout sau khi bấm Đăng.
-

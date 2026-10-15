@@ -9,6 +9,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any, Set
+from urllib.parse import urlparse, parse_qs
 from playwright.sync_api import Page, Locator, TimeoutError as PlaywrightTimeoutError
 
 from core.contracts import PostingResult, AuthCheckpointError
@@ -85,20 +86,26 @@ class FacebookPagePoster:
                 return False
 
             # 2. Positive Authenticated Indicators
-            # Must find at least one reliable authenticated element: navigation, account menu, feed, or home composer
+            # Require account-specific authenticated signals (generic navigation or feeds do NOT count)
             authenticated_selectors = [
-                "div[role='feed']",
-                "div[role='navigation']",
                 "div[aria-label*='Tài khoản'], div[aria-label*='Account']",
-                "div[aria-label*='Trang chủ'], div[aria-label*='Home']",
-                "div[aria-label*='Menu Facebook'], div[aria-label*='Facebook Menu']",
+                "div[aria-label*='Trang cá nhân của bạn'], div[aria-label*='Your profile']",
+                "a[href*='/me'], a[href*='/profile.php']",
+                "div[role='navigation'] [aria-label*='Account'], div[role='navigation'] [aria-label*='Tài khoản']",
                 "div[role='button']:has-text('Bạn đang nghĩ gì'), div[role='button']:has-text(\"What's on your mind\")"
             ]
 
             found_authenticated = False
             for sel in authenticated_selectors:
-                if page.locator(sel).count() > 0:
-                    found_authenticated = True
+                locs = page.locator(sel)
+                try:
+                    for i in range(locs.count()):
+                        if locs.nth(i).is_visible():
+                            found_authenticated = True
+                            break
+                except Exception:
+                    pass
+                if found_authenticated:
                     break
 
             if not found_authenticated:
@@ -121,6 +128,20 @@ class FacebookPagePoster:
             logger.error(f"Ngoại lệ khi kiểm tra đăng nhập: {sanitize_text(str(e))}")
             return False
 
+    @staticmethod
+    def _extract_profile_id_from_url(url: str) -> Optional[str]:
+        """Extract user or page ID from Facebook profile URL."""
+        if not url:
+            return None
+        parsed = urlparse(url)
+        qs = parse_qs(parsed.query)
+        if "id" in qs and qs["id"]:
+            return qs["id"][0].strip()
+        path_parts = [p for p in parsed.path.split('/') if p and p.lower() not in ("pages", "profile.php")]
+        if path_parts:
+            return path_parts[-1].strip()
+        return None
+
     def verify_publishing_actor(self, page_id: str, page_name: Optional[str] = None) -> Tuple[bool, str]:
         """
         Verify that the active publishing actor matches requested Page with positive UI evidence.
@@ -132,48 +153,90 @@ class FacebookPagePoster:
         if "checkpoint" in current_url or "login" in current_url:
             return False, f"Redirected to checkpoint/login: {page.url}"
 
-        expected_tokens = [t.lower().strip() for t in [page_name, page_id] if t and t.strip()]
-        if not expected_tokens:
+        if not page_id and not page_name:
             return False, "No page_id or page_name supplied to verify actor."
 
         try:
-            # 1. Primary: Check explicit persona / actor badge
-            badge_loc = page.locator(
-                "[data-testid='actor-indicator'], "
+            # Check persona / interacting-as badges ONLY (never headings, synthetic test hooks, or switch buttons)
+            badge_locators = page.locator(
                 "div[aria-label*='Đang tương tác dưới tên'], "
                 "div[aria-label*='Interacting as'], "
                 "div[aria-label*='Acting as']"
-            ).first
+            ).all()
 
-            if badge_loc.count() > 0:
-                badge_text = ""
+            if not badge_locators:
+                return False, f"Actor unverified: No positive active persona badge found for '{page_name or page_id}'."
+
+            # Filter for visible badges and exclude switch offers
+            active_badges = []
+            for b in badge_locators:
                 try:
-                    t = (badge_loc.inner_text(timeout=2000) or "").strip()
-                    a = (badge_loc.get_attribute("aria-label") or "").strip()
-                    badge_text = f"{t} {a}".strip().lower()
+                    if not b.is_visible():
+                        continue
+                    if b.get_attribute("hidden") is not None:
+                        continue
+                    aria = (b.get_attribute("aria-label") or "").strip()
+                    lower_aria = aria.lower()
+                    if "switch to" in lower_aria or "chuyển sang" in lower_aria:
+                        continue
+                    active_badges.append(b)
                 except Exception:
-                    pass
+                    continue
 
-                if badge_text:
-                    for token in expected_tokens:
-                        if token in badge_text:
-                            return True, f"Positive actor badge verified: '{badge_text}' matches '{token}'"
-                    return False, f"Actor mismatch: UI shows active actor '{badge_text}', which does not match '{page_name or page_id}'."
+            if not active_badges:
+                return False, f"Actor unverified: No visible active persona badge found for '{page_name or page_id}'."
 
-            # 2. Secondary: If no persona badge exists, check page profile header
-            header_loc = page.locator("div[role='main'] h1, h1, div[role='main'] h2").first
-            if header_loc.count() > 0:
-                header_text = ""
-                try:
-                    header_text = (header_loc.inner_text(timeout=2000) or "").strip().lower()
-                except Exception:
-                    pass
-                if header_text:
-                    for token in expected_tokens:
-                        if token in header_text:
-                            return True, f"Positive page header verified: '{header_text}' matches '{token}'"
+            # Inspect active badges
+            combined_desc = ""
+            for b in active_badges:
+                aria = (b.get_attribute("aria-label") or "").strip()
+                text = (b.inner_text() or "").strip()
+                combined_desc = f"{text} {aria}".strip()
 
-            return False, f"Actor unverified: No positive UI actor evidence for '{page_name or page_id}' found on page."
+                # Check if badge has an <a> link with profile href
+                links = b.locator("a[href]").all()
+                profile_link_target = None
+                for link in links:
+                    href = link.get_attribute("href")
+                    if href:
+                        extracted = self._extract_profile_id_from_url(href)
+                        if extracted:
+                            profile_link_target = extracted
+                            break
+
+                # If badge has a profile link pointing elsewhere, display name cannot override it!
+                if profile_link_target:
+                    if page_id and profile_link_target.lower() != page_id.lower():
+                        return False, (
+                            f"Actor mismatch: Badge profile link points to '{profile_link_target}', "
+                            f"which does not match target page_id '{page_id}'."
+                        )
+
+                # Check page_id with discrete token/word boundary
+                matched = False
+                matched_token = None
+                if page_id:
+                    pattern = rf"\b{re.escape(page_id)}\b"
+                    if re.search(pattern, combined_desc):
+                        matched = True
+                        matched_token = page_id
+
+                # If not matched by page_id, check page_name
+                if not matched and page_name:
+                    if page_name.lower() in combined_desc.lower():
+                        digits_in_badge = re.findall(r'\b\d+\b', combined_desc)
+                        if page_id and digits_in_badge and page_id not in digits_in_badge:
+                            return False, (
+                                f"Actor mismatch: Badge contains conflicting ID {digits_in_badge} "
+                                f"instead of '{page_id}'."
+                            )
+                        matched = True
+                        matched_token = page_name
+
+                if matched:
+                    return True, f"Positive actor badge verified: '{combined_desc}' matches '{matched_token}'"
+
+            return False, f"Actor unverified: Active persona badge '{combined_desc}' does not match '{page_name or page_id}'."
 
         except Exception as e:
             return False, f"Error verifying publishing actor: {sanitize_text(str(e))}"
@@ -202,7 +265,8 @@ class FacebookPagePoster:
         content: str,
         page_name: str,
         preexisting_refs: Set[str],
-        timeout_ms: int = 15000
+        timeout_ms: int = 15000,
+        page_id: Optional[str] = None
     ) -> Optional[Dict[str, str]]:
         """
         Locate newly published post in feed that matches content, actor, and has
@@ -211,40 +275,129 @@ class FacebookPagePoster:
         page = self.page
         deadline = time.time() + (timeout_ms / 1000.0)
 
-        # Truncate content for fuzzy substring matching (first 30 chars without spintax)
-        clean_content = re.sub(r'[\r\n]+', ' ', content).strip()
-        match_snippet = clean_content[:30] if len(clean_content) >= 30 else clean_content
+        # Canonicalize pre-existing references to IDs and full clean URLs
+        preexisting_clean = {r.strip() for r in preexisting_refs if r}
+        preexisting_ids = {self._extract_post_id_from_url(r) for r in preexisting_clean if self._extract_post_id_from_url(r)}
+
+        # Normalize content for matching
+        norm_content = re.sub(r'\s+', ' ', content).strip()
+
+        valid_domains = {"facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "mbasic.facebook.com"}
+
+        allowed_identities = set()
+        if page_name:
+            allowed_identities.add(page_name.lower().strip())
+        if page_id:
+            allowed_identities.add(page_id.lower().strip())
 
         while time.time() < deadline:
             try:
                 articles = page.locator("div[role='article'], div[data-testid*='post'], div[role='feed'] > div").all()
                 for art in articles:
                     try:
-                        art_text = art.inner_text()
-                        if match_snippet and match_snippet not in art_text:
+                        art_text = art.inner_text() or ""
+                        norm_art_text = re.sub(r'\s+', ' ', art_text).strip()
+
+                        # 1. Content Verification: complete content match
+                        if norm_content and norm_content not in norm_art_text:
                             continue
 
-                        # Extract post links within this article
+                        # 2. Freshness Check: reject old/stale posts
+                        time_locs = art.locator("time").all()
+                        is_stale = False
+                        for t in time_locs:
+                            try:
+                                dt_attr = t.get_attribute("datetime")
+                                if dt_attr:
+                                    dt_clean = dt_attr.replace("Z", "+00:00")
+                                    post_time = datetime.fromisoformat(dt_clean)
+                                    if post_time.tzinfo is None:
+                                        post_time = post_time.replace(tzinfo=timezone.utc)
+                                    now_utc = datetime.now(timezone.utc)
+                                    age_seconds = (now_utc - post_time).total_seconds()
+                                    if age_seconds > 600 or age_seconds < -300:
+                                        is_stale = True
+                                        break
+                                time_text = (t.inner_text() or "").strip().lower()
+                                old_indicators = [
+                                    "yesterday", "hôm qua", "ngày trước", "days ago", "months ago",
+                                    "years ago", "năm trước", "tháng trước", "january", "february",
+                                    "march", "april", "may", "june", "july", "august", "september",
+                                    "october", "november", "december"
+                                ]
+                                if any(ind in time_text for ind in old_indicators):
+                                    is_stale = True
+                                    break
+                            except Exception:
+                                pass
+
+                        if is_stale:
+                            continue
+
+                        # 3. Extract post links within this article
                         post_links = art.locator("a[href*='/posts/'], a[href*='/permalink/'], a[href*='story_fbid='], a[href*='fbid=']").all()
+                        if not post_links:
+                            continue
+
                         for pl in post_links:
                             href = pl.get_attribute("href")
-                            if not href or href.strip() in preexisting_refs:
+                            if not href:
+                                continue
+                            href_clean = href.strip()
+
+                            # 4. Domain Check: reject external URLs
+                            parsed_url = urlparse(href_clean)
+                            if parsed_url.netloc:
+                                domain = parsed_url.netloc.lower().split(':')[0]
+                                if domain not in valid_domains:
+                                    continue
+
+                            # 5. Extract post_id from URL
+                            post_id = self._extract_post_id_from_url(href_clean)
+                            if not post_id:
                                 continue
 
-                            href_clean = href.strip()
-                            # Extract post_id from URL
-                            post_id = self._extract_post_id_from_url(href_clean)
-                            if post_id:
-                                return {
-                                    "post_id": post_id,
-                                    "post_url": href_clean
-                                }
+                            # 6. Canonical Deduplication Check
+                            if post_id in preexisting_ids or href_clean in preexisting_clean:
+                                continue
+
+                            # 7. Actor / Author Verification
+                            # If post link has a page/user slug or ID in path, check it matches allowed identities
+                            m_slug = re.search(r'facebook\.com/([^/?#]+)/posts/', href_clean)
+                            if m_slug:
+                                post_owner = m_slug.group(1).strip()
+                                if post_owner.lower() != "groups":
+                                    if allowed_identities and post_owner.lower() not in allowed_identities:
+                                        continue
+
+                            # Also check author links in article (links that are not post links)
+                            author_links = art.locator("a:not([href*='/posts/']):not([href*='/permalink/']):not([href*='story_fbid']):not([href*='fbid='])").all()
+                            if author_links:
+                                author_match_found = False
+                                for alink in author_links:
+                                    ahref = alink.get_attribute("href") or ""
+                                    atext = (alink.inner_text() or "").strip()
+                                    target_id = self._extract_profile_id_from_url(ahref)
+                                    if target_id and allowed_identities and target_id.lower() in allowed_identities:
+                                        author_match_found = True
+                                        break
+                                    if any(ident in atext.lower() for ident in allowed_identities):
+                                        author_match_found = True
+                                        break
+                                if not author_match_found:
+                                    continue
+
+                            # Verified matching post found!
+                            return {
+                                "post_id": post_id,
+                                "post_url": href_clean
+                            }
                     except Exception:
                         continue
             except Exception:
                 pass
 
-            time.sleep(1.0)
+            time.sleep(0.5)
 
         return None
 
@@ -561,7 +714,8 @@ class FacebookPagePoster:
                 content=final_content,
                 page_name=page_name or page_id,
                 preexisting_refs=preexisting_refs,
-                timeout_ms=post_click_verify_timeout_ms
+                timeout_ms=post_click_verify_timeout_ms,
+                page_id=page_id
             )
 
             if confirmed_post:
