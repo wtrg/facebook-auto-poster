@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+fb_master_profile/
+temp_media/
+error_screenshots/
+discovered_pages.json
+.env

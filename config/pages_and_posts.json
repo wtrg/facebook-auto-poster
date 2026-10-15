@@ -1,0 +1,27 @@
+{
+  "account_cookie": "datr=xxxx; sb=xxxx; c_user=1000xxxx; xs=xxxx;",
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "tasks": [
+    {
+      "task_id": "post_001",
+      "page_id": "61550000000001",
+      "page_name": "Shop Thoi Trang Nu 01",
+      "content": "{Chào các nàng|Hello cả nhà|Siêu phẩm mới về} mẫu váy thu đông cực xinh! {Đặt hàng ngay|Inbox cho shop} để nhận ưu đãi nhé!",
+      "media_paths": [
+        "sample_product.jpg"
+      ],
+      "status": "pending"
+    },
+    {
+      "task_id": "post_002",
+      "page_id": "61550000000002",
+      "page_name": "Phu Kien Xinh 02",
+      "content": "{Hàng mới cập bến|Deal hời hôm nay} túi xách cao cấp giảm giá 30% {duy nhất tuần này|số lượng có hạn}!",
+      "media_paths": [
+        "sample_product.jpg"
+      ],
+      "status": "pending"
+    }
+  ]
+}
