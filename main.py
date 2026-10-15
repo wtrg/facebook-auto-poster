@@ -153,10 +153,11 @@ class NightSchedulerWorker:
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    def load_and_validate(self, check_media_exists: bool = True) -> Dict[str, Any]:
+    def load_and_validate(self, check_media_exists: bool = True, dry_run: bool = False) -> Dict[str, Any]:
         """
         Validate configuration schema and initialize/recover state store.
         Does NOT launch browser or perform network calls.
+        When dry_run=True, state is inspected read-only without modifying disk.
         """
         raw_cfg, tasks, secrets, timing_cfg = load_and_validate_config(
             self.config_file,
@@ -167,7 +168,7 @@ class NightSchedulerWorker:
         self.secrets = secrets
         self.timing = self.timing_override if self.timing_override else timing_cfg
 
-        recovered_count = self.state_store.load_or_initialize(self.configured_tasks)
+        recovered_count = self.state_store.load_or_initialize(self.configured_tasks, read_only=dry_run)
         summary = self.state_store.get_summary()
 
         return {
@@ -189,11 +190,11 @@ class NightSchedulerWorker:
     def run_dry_run(self) -> int:
         """
         Execute dry-run validation without browser or network side effects.
-        Outputs execution plan and exits cleanly.
+        Outputs execution plan and exits cleanly without modifying state.
         """
         logger.info("=== BẮT ĐẦU CHẾ ĐỘ DRY-RUN (KIỂM TRA CẤU HÌNH & TRẠNG THÁI) ===")
         try:
-            info = self.load_and_validate(check_media_exists=True)
+            info = self.load_and_validate(check_media_exists=True, dry_run=True)
         except ConfigValidationError as e:
             logger.error(str(e))
             return 1
@@ -279,6 +280,7 @@ class NightSchedulerWorker:
         success_count = 0
         fail_count = 0
         consecutive_failures = 0
+        shift_failed = False
 
         try:
             # Initialize browser session if not injected
@@ -302,6 +304,7 @@ class NightSchedulerWorker:
                         f"🚨 CẦU CHÌ TỰ NGẮT ĐÃ KÍCH HOẠT: {consecutive_failures} Page liên tiếp thất bại. "
                         f"Dừng ca đêm khẩn cấp để bảo vệ an toàn tài khoản!"
                     )
+                    shift_failed = True
                     break
 
                 logger.info(f"[{index+1}/{len(pending_tasks)}] Đang xử lý: {task.page_name} ({task.page_id})")
@@ -311,6 +314,7 @@ class NightSchedulerWorker:
                     self.state_store.mark_in_progress(task.task_id)
                 except PersistenceError as pe:
                     logger.error(f"Lỗi lưu trạng thái in-flight cho task {task.task_id}: {pe}. Dừng trước khi gọi mạng.")
+                    shift_failed = True
                     break
 
                 # Execute posting side effect
@@ -412,7 +416,12 @@ class NightSchedulerWorker:
                     pass
 
             if os.path.exists("./temp_media"):
-                shutil.rmtree("./temp_media", ignore_errors=True)
+                # Safe cleanup: remove empty temp_media directory without deleting unrelated files
+                try:
+                    if len(os.listdir("./temp_media")) == 0:
+                        os.rmdir("./temp_media")
+                except Exception:
+                    pass
 
             self.lock.release()
             allow_windows_sleep()
@@ -427,7 +436,7 @@ class NightSchedulerWorker:
             send_telegram_report(bot_token, chat_id, summary)
             logger.info("=== KẾT THÚC CA CHẠY ĐÊM ===")
 
-        return 0
+        return 1 if shift_failed else 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -452,13 +461,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="./fb_master_profile",
         help="Path to Chrome user data profile directory (default: ./fb_master_profile)"
     )
-    parser.add_argument(
+
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument(
         "--execute",
         action="store_true",
         default=False,
         help="Explicitly enable live browser execution (default is dry-run validation mode)"
     )
-    parser.add_argument(
+    mode_group.add_argument(
         "--dry-run",
         action="store_true",
         default=False,
@@ -483,12 +494,23 @@ def main():
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # 1. Mutually exclusive flag validation
+    if args.execute and args.dry_run:
+        parser.error("Flags --execute and --dry-run are mutually exclusive.")
+
+    # 2. Timing override validation
+    if args.min_break is not None and args.min_break <= 0:
+        parser.error("--min-break must be a positive integer >= 1.")
+    if args.max_break is not None and args.max_break <= 0:
+        parser.error("--max-break must be a positive integer >= 1.")
+    if args.min_break is not None and args.max_break is not None and args.max_break < args.min_break:
+        parser.error(f"--max-break ({args.max_break}) cannot be less than --min-break ({args.min_break}).")
+
     script_dir = Path(__file__).resolve().parent
 
     # Resolve config path
     config_path = Path(args.config)
     if not config_path.exists():
-        # Check relative to script directory
         candidate = script_dir / args.config
         if candidate.exists():
             config_path = candidate

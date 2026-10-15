@@ -142,62 +142,104 @@ class AtomicStateStore:
     1. Atomic commit via write-flush-fsync-replace.
     2. No loss of previously committed state.
     3. Crash recovery: any IN_PROGRESS task becomes UNKNOWN_NEEDS_RECONCILIATION.
+    4. Corrupt state fails closed without overwriting.
+    5. Archived tasks not in current config are not scheduled.
     """
     def __init__(self, state_file: Path):
         self.state_file = state_file
         self.tasks: Dict[str, PostingTask] = {}
+        self.configured_task_ids: set[str] = set()
         self.metadata: Dict[str, Any] = {}
 
-    def load_or_initialize(self, configured_tasks: List[PostingTask]) -> int:
+    def load_or_initialize(
+        self,
+        configured_tasks: List[PostingTask],
+        read_only: bool = False
+    ) -> int:
         """
         Load existing state or initialize from configured tasks.
         Recovers crashed in-progress work as UNKNOWN_NEEDS_RECONCILIATION.
+        When read_only is True, state is inspected without writing to disk.
         Returns number of recovered tasks.
         """
         recovered_count = 0
         existing_tasks: Dict[str, PostingTask] = {}
+        self.configured_task_ids = {t.task_id for t in configured_tasks}
 
         if self.state_file.exists():
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.metadata = data.get("metadata", {})
-                    for t_data in data.get("tasks", []):
-                        task = PostingTask.from_dict(t_data)
-                        # Crash recovery check: if task was left in_progress, it means previous run crashed mid-flight
-                        if task.status == TaskStatus.IN_PROGRESS:
-                            task.status = TaskStatus.UNKNOWN_NEEDS_RECONCILIATION
-                            task.error_message = (
-                                "Process interrupted or crashed while in-flight. "
-                                "Outcome uncertain; manual reconciliation required before retry."
-                            )
-                            recovered_count += 1
-                        existing_tasks[task.task_id] = task
             except Exception as e:
                 raise PersistenceError(f"Failed to read existing state file '{self.state_file}': {e}")
 
-        # Merge configured tasks into existing state without losing committed state
+            # Corrupt existing state checks
+            if not isinstance(data, dict):
+                raise PersistenceError(f"Existing state file '{self.state_file}' is not a valid JSON object.")
+            if "tasks" not in data or not isinstance(data["tasks"], list):
+                raise PersistenceError(f"Existing state file '{self.state_file}' is missing a valid 'tasks' list.")
+            if len(data["tasks"]) == 0 and len(configured_tasks) > 0:
+                raise PersistenceError(f"Existing state file '{self.state_file}' has empty 'tasks' list; cannot reset configured tasks.")
+
+            self.metadata = dict(data.get("metadata", {}))
+            seen_state_ids = set()
+            valid_statuses = [s.value for s in TaskStatus]
+
+            for t_data in data["tasks"]:
+                if not isinstance(t_data, dict) or "task_id" not in t_data:
+                    raise PersistenceError(f"Existing state file '{self.state_file}' contains invalid task item.")
+
+                tid = t_data["task_id"]
+                if tid in seen_state_ids:
+                    raise PersistenceError(f"Duplicate task record '{tid}' in existing state file '{self.state_file}'.")
+                seen_state_ids.add(tid)
+
+                if "status" not in t_data or not t_data["status"] or t_data["status"] not in valid_statuses:
+                    raise PersistenceError(f"Task '{tid}' in existing state is missing a valid 'status'.")
+
+                task = PostingTask.from_dict(t_data)
+                # Crash recovery check: if task was left in_progress, previous run crashed mid-flight
+                if task.status == TaskStatus.IN_PROGRESS:
+                    recovered_count += 1
+                    if not read_only:
+                        task.status = TaskStatus.UNKNOWN_NEEDS_RECONCILIATION
+                        task.error_message = (
+                            "Process interrupted or crashed while in-flight. "
+                            "Outcome uncertain; manual reconciliation required before retry."
+                        )
+                existing_tasks[task.task_id] = task
+
+        # Merge configured tasks into state without losing committed state
         self.tasks = {}
         for cfg_task in configured_tasks:
             tid = cfg_task.task_id
             if tid in existing_tasks:
-                # Keep existing progress / status, but update content/page if changed
                 existing = existing_tasks[tid]
-                existing.page_id = cfg_task.page_id
-                existing.page_name = cfg_task.page_name
-                existing.content = cfg_task.content
-                existing.media_paths = cfg_task.media_paths
+                identity_changed = (existing.content != cfg_task.content) or (existing.page_id != cfg_task.page_id)
+                if identity_changed and (existing.attempts > 0 or existing.status != TaskStatus.PENDING):
+                    if not read_only:
+                        existing.status = TaskStatus.UNKNOWN_NEEDS_RECONCILIATION
+                        existing.error_message = (
+                            "Task content or page_id changed after prior execution/attempt; "
+                            "manual reconciliation required."
+                        )
+                else:
+                    existing.page_name = cfg_task.page_name
+                    existing.content = cfg_task.content
+                    existing.media_paths = cfg_task.media_paths
                 self.tasks[tid] = existing
             else:
                 self.tasks[tid] = cfg_task
 
-        # Also preserve any tasks that were in state but no longer in config
+        # Retain archived history for any tasks that were in state but removed from current config
         for tid, ex_task in existing_tasks.items():
             if tid not in self.tasks:
                 self.tasks[tid] = ex_task
 
-        # Persist recovered state immediately
-        self.save()
+        # Persist recovered state only when not read_only
+        if not read_only:
+            self.save()
+
         return recovered_count
 
     def save(self) -> None:
@@ -243,12 +285,15 @@ class AtomicStateStore:
         confirmed: bool = True
     ) -> PostingTask:
         """Mark task as successfully published with verified reference."""
+        has_ref = bool(post_id and str(post_id).strip()) or bool(post_url and str(post_url).strip())
+        if not (bool(confirmed) and has_ref):
+            raise ValueError("Completion strictly requires confirmed=True and a valid post reference (post_id or post_url).")
         task = self.tasks[task_id]
         task.status = TaskStatus.COMPLETED
         task.posted_at = datetime.now(timezone.utc).isoformat()
         task.post_id = post_id
         task.post_url = post_url
-        task.confirmed = confirmed
+        task.confirmed = True
         task.error_message = None
         self.save()
         return task
@@ -270,8 +315,11 @@ class AtomicStateStore:
         return task
 
     def get_pending_tasks(self) -> List[PostingTask]:
-        """Return only tasks eligible for posting (status == PENDING)."""
-        return [t for t in self.tasks.values() if t.status == TaskStatus.PENDING]
+        """Return only currently configured, authorized tasks eligible for posting (status == PENDING)."""
+        return [
+            t for t in self.tasks.values()
+            if t.task_id in self.configured_task_ids and t.status == TaskStatus.PENDING
+        ]
 
     def get_summary(self) -> Dict[str, int]:
         """Return task count breakdown by status."""

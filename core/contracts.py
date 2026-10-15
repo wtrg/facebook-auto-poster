@@ -30,8 +30,9 @@ class PostingResult:
     confirmed: bool = False
 
     def is_verified_success(self) -> bool:
-        """Confirmed publication requires boolean success AND confirmed flag or post reference."""
-        return self.success and (self.confirmed or bool(self.post_id) or bool(self.post_url))
+        """Confirmed publication strictly requires boolean success AND confirmed flag AND valid post reference."""
+        has_ref = bool(self.post_id and str(self.post_id).strip()) or bool(self.post_url and str(self.post_url).strip())
+        return bool(self.success) and bool(self.confirmed) and has_ref
 
 
 @dataclass

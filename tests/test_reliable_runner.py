@@ -177,16 +177,30 @@ def test_no_persistence_overwrite_loses_committed_state(tmp_path):
     store.load_or_initialize([t1])
     store.mark_completed("t1", post_id="post_999", confirmed=True)
 
-    # Now reload with a new configuration where t1 has status 'pending'
-    t1_new_cfg = PostingTask(task_id="t1", page_id="p1", page_name="P1", content="New Content")
+    # Now reload with a new configuration where t1 has same content and t2 is new
+    t1_same_cfg = PostingTask(task_id="t1", page_id="p1", page_name="P1", content="Hello")
     t2_new_cfg = PostingTask(task_id="t2", page_id="p2", page_name="P2", content="New Task")
 
-    store.load_or_initialize([t1_new_cfg, t2_new_cfg])
+    store.load_or_initialize([t1_same_cfg, t2_new_cfg])
 
     # Committed completed status must be preserved!
     assert store.tasks["t1"].status == TaskStatus.COMPLETED
     assert store.tasks["t1"].post_id == "post_999"
     assert store.tasks["t2"].status == TaskStatus.PENDING
+
+
+def test_task_content_changed_after_attempt_requires_reconciliation(tmp_path):
+    state_file = tmp_path / "state.json"
+    store = AtomicStateStore(state_file)
+
+    t1 = PostingTask(task_id="t1", page_id="p1", page_name="P1", content="Hello")
+    store.load_or_initialize([t1])
+    store.mark_completed("t1", post_id="post_999", confirmed=True)
+
+    # If content changes after execution, it must require manual reconciliation!
+    t1_mod = PostingTask(task_id="t1", page_id="p1", page_name="P1", content="Modified Content")
+    store.load_or_initialize([t1_mod])
+    assert store.tasks["t1"].status == TaskStatus.UNKNOWN_NEEDS_RECONCILIATION
 
 
 def test_single_worker_mutual_exclusion(tmp_path):
