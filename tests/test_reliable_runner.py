@@ -106,6 +106,27 @@ def test_schema_validation_invalid_timing(tmp_path):
     assert "cannot be less than min_break_minutes" in str(exc.value)
 
 
+@pytest.mark.parametrize("partial_timing,expected_phrase", [
+    ({"min_break_minutes": 7}, "cannot be less than min_break_minutes"),
+    ({"long_break_min_minutes": 31}, "cannot be less than long_break_min_minutes"),
+    ({"max_break_minutes": 2}, "cannot be less than min_break_minutes"),
+    ({"long_break_max_minutes": 10}, "cannot be less than long_break_min_minutes"),
+])
+def test_schema_validation_effective_timing_defaults_merged(tmp_path, partial_timing, expected_phrase):
+    config = {
+        "timing": partial_timing,
+        "tasks": [
+            {"task_id": "task_ok", "page_id": "p1", "content": "Hello", "media_paths": []}
+        ]
+    }
+    cfg_file = tmp_path / "timing_partial.json"
+    cfg_file.write_text(json.dumps(config), encoding="utf-8")
+
+    with pytest.raises(ConfigValidationError) as exc:
+        load_and_validate_config(cfg_file, check_media_exists=False)
+    assert expected_phrase in str(exc.value)
+
+
 # -----------------------------------------------------------------------------
 # 2. SECRET REDACTION & PRECEDENCE TESTS
 # -----------------------------------------------------------------------------

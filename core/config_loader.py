@@ -168,10 +168,6 @@ def validate_config_dict(
                 if not is_strict_int(v) or v <= 0:
                     errors.append("timing.max_break_minutes must be a positive integer >= 1.")
 
-            if is_strict_int(timing.get("min_break_minutes")) and is_strict_int(timing.get("max_break_minutes")):
-                if timing["max_break_minutes"] < timing["min_break_minutes"]:
-                    errors.append(f"timing.max_break_minutes ({timing['max_break_minutes']}) cannot be less than min_break_minutes ({timing['min_break_minutes']}).")
-
             # batch_size: strictly integer >= 1
             if "batch_size" in timing:
                 v = timing["batch_size"]
@@ -196,9 +192,20 @@ def validate_config_dict(
                 if not is_strict_int(v) or v < 0:
                     errors.append("timing.long_break_max_minutes must be a non-negative integer >= 0.")
 
-            if is_strict_int(timing.get("long_break_min_minutes")) and is_strict_int(timing.get("long_break_max_minutes")):
-                if timing["long_break_max_minutes"] < timing["long_break_min_minutes"]:
-                    errors.append(f"timing.long_break_max_minutes ({timing['long_break_max_minutes']}) cannot be less than long_break_min_minutes ({timing['long_break_min_minutes']}).")
+            # Effective timing checks after merging supplied valid values with defaults
+            has_break_type_error = any("timing.min_break_minutes" in e or "timing.max_break_minutes" in e for e in errors)
+            if not has_break_type_error:
+                eff_min = timing.get("min_break_minutes", WorkerTimingConfig.min_break_minutes)
+                eff_max = timing.get("max_break_minutes", WorkerTimingConfig.max_break_minutes)
+                if eff_max < eff_min:
+                    errors.append(f"timing.max_break_minutes ({eff_max}) cannot be less than min_break_minutes ({eff_min}).")
+
+            has_long_type_error = any("timing.long_break_min_minutes" in e or "timing.long_break_max_minutes" in e for e in errors)
+            if not has_long_type_error:
+                eff_long_min = timing.get("long_break_min_minutes", WorkerTimingConfig.long_break_min_minutes)
+                eff_long_max = timing.get("long_break_max_minutes", WorkerTimingConfig.long_break_max_minutes)
+                if eff_long_max < eff_long_min:
+                    errors.append(f"timing.long_break_max_minutes ({eff_long_max}) cannot be less than long_break_min_minutes ({eff_long_min}).")
 
     return errors
 
