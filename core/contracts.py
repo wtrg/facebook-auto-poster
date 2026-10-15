@@ -14,6 +14,11 @@ class TaskStatus(str, Enum):
     UNKNOWN_NEEDS_RECONCILIATION = "unknown_needs_reconciliation"
 
 
+class AuthCheckpointError(Exception):
+    """Raised when Facebook login session expires, redirects to login, or hits a security checkpoint."""
+    pass
+
+
 @dataclass
 class PostingResult:
     """
@@ -28,6 +33,7 @@ class PostingResult:
     error_code: Optional[str] = None
     error_message: Optional[str] = None
     confirmed: bool = False
+    is_uncertain: bool = False
 
     def is_verified_success(self) -> bool:
         """Confirmed publication strictly requires boolean success AND confirmed flag AND valid post reference."""

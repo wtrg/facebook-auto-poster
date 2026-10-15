@@ -145,10 +145,11 @@ def validate_config_dict(
                         if not is_strict_str(mp) or not mp.strip():
                             errors.append(f"{loc}.media_paths[{m_idx}] (task '{tid_str}'): Media path must be a non-empty string.")
                             continue
-                        if check_media_exists:
-                            resolved = (base_dir / mp).resolve() if not os.path.isabs(mp) else Path(mp)
-                            if not resolved.exists():
-                                errors.append(f"{loc} (task '{tid_str}'): Media file not found: '{mp}'.")
+                        resolved = (base_dir / mp).resolve() if not os.path.isabs(mp) else Path(mp)
+                        if resolved.exists() and not resolved.is_file():
+                            errors.append(f"{loc} (task '{tid_str}'): Media path is a directory, not a file: '{mp}'.")
+                        elif check_media_exists and not resolved.exists():
+                            errors.append(f"{loc} (task '{tid_str}'): Media file not found: '{mp}'.")
 
     # Timing validation
     if "timing" in data:
@@ -288,5 +289,21 @@ def load_and_validate_config(
         max_consecutive_failures=int(timing_dict.get("max_consecutive_failures", 3)),
     )
 
-    tasks = [PostingTask.from_dict(t) for t in raw_data.get("tasks", [])]
+    tasks: List[PostingTask] = []
+    for t in raw_data.get("tasks", []):
+        task_dict = dict(t)
+        if "media_paths" in task_dict and isinstance(task_dict["media_paths"], list):
+            resolved_paths = []
+            for mp in task_dict["media_paths"]:
+                if isinstance(mp, str):
+                    p = Path(mp)
+                    if not p.is_absolute():
+                        resolved_paths.append(str((base_dir / p).resolve()))
+                    else:
+                        resolved_paths.append(str(p.resolve()))
+                else:
+                    resolved_paths.append(mp)
+            task_dict["media_paths"] = resolved_paths
+        tasks.append(PostingTask.from_dict(task_dict))
+
     return raw_data, tasks, secrets, timing_cfg

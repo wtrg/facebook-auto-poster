@@ -119,8 +119,34 @@ Tùy chỉnh thời gian nghỉ giãn cách:
 python main.py --execute --min-break 4 --max-break 8
 ```
 
-### 5. Chạy kiểm thử tự động
+### 5. Vận hành Trình duyệt & Đăng nhập Thủ công (Manual Login & Profile Setup)
+
+Khi triển khai trên máy thật hoặc khi tài khoản yêu cầu xác thực 2 bước (2FA), checkpoint bảo mật:
+1. **Khởi tạo Profile Trình duyệt Thủ công**:
+   - Profile người dùng được lưu trữ cục bộ trong thư mục `fb_master_profile/` (được cách ly bởi `.gitignore`).
+   - Có thể khởi động trình duyệt có giao diện (`headless=False`) để đăng nhập và giải quyết captcha/2FA thủ công lần đầu:
+   ```bash
+   python -c "from core.session_manager import FacebookSessionManager; s = FacebookSessionManager('./fb_master_profile'); s.start_browser(headless=False); input('Sau khi đăng nhập xong trên trình duyệt, nhấn Enter tại đây để lưu profile...'); s.close()"
+   ```
+   - Sau khi hoàn thành, phiên đăng nhập được lưu bền vững trong `fb_master_profile/`. Các lần chạy tự động tiếp theo sẽ tái sử dụng phiên này mà không cần nhập lại mật khẩu.
+
+2. **Cơ chế Xác minh Phiên & Danh tính Người Đăng (Actor Verification)**:
+   - **Xác thực Đăng nhập**: Trước khi tiến hành ca chạy, hệ thống kiểm tra URL và DOM (`verify_logged_in`). Nếu phát hiện chuyển hướng sang `/login`, form đăng nhập hoặc từ khóa `checkpoint`, ca đêm lập tức dừng khẩn cấp để bảo vệ tài khoản.
+   - **Xác minh Danh tính Page Đăng bài (Actor Identity)**:
+     - Việc đổi cookie `i_user` hay chuyển trang tới `facebook.com/{page_id}` **không phải là bằng chứng danh tính**.
+     - Hệ thống yêu cầu bằng chứng UI tích cực: kiểm tra huy hiệu persona đang tương tác (`div[aria-label*='Đang tương tác dưới tên']`, `div[aria-label*='Interacting as']`, `div[aria-label*='Acting as']`).
+     - **Giới hạn & An toàn (Limitation)**: Nếu huy hiệu persona hiển thị tài khoản cá nhân hoặc không tìm thấy bằng chứng tích cực, công cụ sẽ từ chối bấm nút Đăng (trả về lỗi `ACTOR_UNVERIFIED`) nhằm tuyệt đối ngăn ngừa đăng nhầm bài của Fanpage lên trang cá nhân của người dùng.
+
+3. **Phân định Thất bại Trước Gửi (Pre-Send) & Bất định Sau Bấm (Post-Click)**:
+   - **Trước khi bấm (Pre-send)**: Tệp media bị thiếu trên đĩa (`MISSING_MEDIA`), lỗi upload trong hộp thoại (`UPLOAD_FAILED`), danh tính chưa xác minh (`ACTOR_UNVERIFIED`), hoặc nút Đăng bị khóa (`BUTTON_DISABLED`) -> Tác vụ bị đánh dấu `FAILED` bình thường, hoàn toàn an toàn vì chưa có yêu cầu gửi lên mạng.
+   - **Sau khi bấm nút Đăng (Post-click)**: Bất kỳ ngoại lệ, rớt mạng hoặc hết thời gian chờ (timeout) nào xảy ra sau khi nút Đăng đã được click đều được phân loại là `POST_CLICK_UNCERTAIN` và chuyển sang trạng thái `UNKNOWN_NEEDS_RECONCILIATION`. Hệ thống **tuyệt đối không tự động chạy lại (không auto-retry)** nhằm chống đăng trùng lặp.
+
+### 6. Chạy kiểm thử tự động (Unit Tests & Local Playwright Fixtures)
+Toàn bộ quy trình trình duyệt được kiểm thử thông qua cơ chế Route Interception cục bộ của Playwright (Chromium thực tế, không gửi bất kỳ yêu cầu mạng nào ra Internet):
 ```bash
 pytest tests/ -v
 ```
-Toàn bộ các trường hợp kiểm thử kiểm tra schema, khóa đơn tiến trình, phục hồi sự cố in-flight và che dấu bí mật đều được tự động hóa.
+Các bộ kiểm thử bao gồm:
+- `tests/test_reliable_runner.py`: Kiểm thử schema, tính nguyên tử, chống ghi đè, và khóa đơn tiến trình.
+- `tests/test_page_poster_fixtures.py`: Kiểm thử tương tác Chromium thực tế trên các kịch bản: hết hạn phiên đăng nhập, checkpoint, danh tính không khớp, thiếu tệp media, lỗi tải lên, bài viết cũ trên dòng thời gian, và xử lý timeout sau khi bấm Đăng.
+

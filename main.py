@@ -321,11 +321,20 @@ class NightSchedulerWorker:
                 try:
                     # Check if poster supports verified contract (Task 002)
                     if hasattr(poster, "create_post_verified"):
-                        result: PostingResult = poster.create_post_verified(
-                            page_id=task.page_id,
-                            raw_content=task.content,
-                            media_paths=task.media_paths
-                        )
+                        try:
+                            result: PostingResult = poster.create_post_verified(
+                                page_id=task.page_id,
+                                raw_content=task.content,
+                                media_paths=task.media_paths,
+                                page_name=task.page_name,
+                                task_id=task.task_id
+                            )
+                        except TypeError:
+                            result: PostingResult = poster.create_post_verified(
+                                page_id=task.page_id,
+                                raw_content=task.content,
+                                media_paths=task.media_paths
+                            )
                     else:
                         # Legacy poster adapter call
                         raw_ok = poster.create_post(
@@ -358,6 +367,27 @@ class NightSchedulerWorker:
                         success_count += 1
                         consecutive_failures = 0
                         logger.info(f"--> THÀNH CÔNG (Xác nhận): {task.page_name} (post_id={result.post_id})")
+                    elif result.is_uncertain or result.error_code == "POST_CLICK_UNCERTAIN":
+                        # Post-click uncertainty -> UNKNOWN_NEEDS_RECONCILIATION (never auto-retried)
+                        self.state_store.mark_unknown_reconciliation(
+                            task_id=task.task_id,
+                            reason=result.error_message or "Post-click timeout or uncertain outcome"
+                        )
+                        fail_count += 1
+                        consecutive_failures += 1
+                        logger.warning(f"--> CẦN ĐỐI SOÁT: {task.page_name} ({result.error_message})")
+                    elif result.error_code == "AUTH_CHECKPOINT":
+                        # Checkpoint or expired session halts entire shift immediately
+                        self.state_store.mark_failed(
+                            task_id=task.task_id,
+                            error_message=result.error_message or "Checkpoint or session expired"
+                        )
+                        fail_count += 1
+                        msg = f"🚨 CẢNH BÁO: Phát hiện Checkpoint hoặc hết phiên đăng nhập khi xử lý {task.page_name}! Dừng ca đêm ngay lập tức."
+                        logger.error(msg)
+                        send_telegram_report(bot_token, chat_id, msg)
+                        shift_failed = True
+                        break
                     elif result.success and not result.confirmed and not result.post_id and not result.post_url:
                         # Legacy unconfirmed success: transition to unknown_needs_reconciliation to avoid unverified completion
                         self.state_store.mark_unknown_reconciliation(
