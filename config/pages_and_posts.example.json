@@ -1,0 +1,36 @@
+{
+  "_comment": "Safe example configuration. DO NOT commit actual credentials to git. Set via ENV (FB_ACCOUNT_COOKIE, TELEGRAM_BOT_TOKEN) or local config/secrets.json",
+  "account_cookie": "datr=REDACTED_COOKIE; c_user=100000000000000; xs=REDACTED_XS;",
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "timing": {
+    "min_break_minutes": 3,
+    "max_break_minutes": 6,
+    "batch_size": 15,
+    "long_break_min_minutes": 20,
+    "long_break_max_minutes": 30,
+    "max_consecutive_failures": 3
+  },
+  "tasks": [
+    {
+      "task_id": "post_example_001",
+      "page_id": "61550000000001",
+      "page_name": "Shop Thoi Trang Nu 01",
+      "content": "{Chào các nàng|Hello cả nhà|Siêu phẩm mới về} mẫu váy thu đông cực xinh! {Đặt hàng ngay|Inbox cho shop} để nhận ưu đãi nhé!",
+      "media_paths": [
+        "../sample_product.jpg"
+      ],
+      "status": "pending"
+    },
+    {
+      "task_id": "post_example_002",
+      "page_id": "61550000000002",
+      "page_name": "Phu Kien Xinh 02",
+      "content": "{Hàng mới cập bến|Deal hời hôm nay} túi xách cao cấp giảm giá 30% {duy nhất tuần này|số lượng có hạn}!",
+      "media_paths": [
+        "../sample_product.jpg"
+      ],
+      "status": "pending"
+    }
+  ]
+}

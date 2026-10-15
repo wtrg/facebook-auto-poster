@@ -5,4 +5,9 @@ fb_master_profile/
 temp_media/
 error_screenshots/
 discovered_pages.json
-.env
+.env*
+*secrets*.json
+state/
+*.lock
+*.tmp*
+sample_product.jpg
